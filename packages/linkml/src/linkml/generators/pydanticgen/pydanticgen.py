@@ -1,3 +1,4 @@
+import copy
 import inspect
 import keyword
 import logging
@@ -35,6 +36,7 @@ from linkml.generators.pydanticgen.template import (
 )
 from linkml.utils.generator import shared_arguments
 from linkml_runtime.linkml_model.meta import (
+    AnonymousSlotExpression,
     ClassDefinition,
     ElementName,
     SchemaDefinition,
@@ -598,13 +600,21 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
         # Confirm that the original slot range (ignoring the default that comes in from
         # induced_slot) isn't in addition to setting any_of
         any_of_ranges = [a.range if a.range else slot.range for a in slot.any_of]
+        # Track whether any branch already encodes its own collection type (list/dict).
+        # When true, the parent-level multivalued wrapping must be skipped so that
+        # branches such as ``{range: C, multivalued: true, inlined: true}`` produce
+        # ``dict[str, C]`` rather than having an outer ``list[…]`` applied on top.
+        branch_handles_collection = False
         if any_of_ranges:
             # list comprehension here is pulling ranges from within AnonymousSlotExpression
             slot_ranges.extend(any_of_ranges)
+            # Generate the Python type for every branch individually, so that
+            # per-branch inlined/inlined_as_list/multivalued settings are respected.
+            pyranges = [self._generate_branch_range(a, slot, cls) for a in slot.any_of]
+            branch_handles_collection = any(bool(a.multivalued) for a in slot.any_of)
         else:
             slot_ranges.append(slot.range)
-
-        pyranges = [self.generate_python_range(slot_range, slot, cls) for slot_range in slot_ranges]
+            pyranges = [self.generate_python_range(slot_range, slot, cls) for slot_range in slot_ranges]
 
         pyranges = list(set(pyranges))  # remove duplicates
         pyranges.sort()
@@ -833,6 +843,57 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
             # pyrange = 'str'
             # logger.error(f'range: {s.range} is unknown')
             raise Exception(f"range: {slot_range}")
+        return pyrange
+
+    def _generate_branch_range(
+        self,
+        branch: AnonymousSlotExpression,
+        parent_slot: SlotDefinition,
+        class_def: ClassDefinition,
+    ) -> str:
+        """Generate the Python type for a single ``any_of`` branch.
+
+        Respects per-branch ``inlined``, ``inlined_as_list``, and
+        ``multivalued`` settings, falling back to the parent slot's values
+        when a branch does not override them.
+
+        When the branch carries its own ``multivalued: true``, the returned
+        type string already includes the collection wrapper (``list[…]`` or
+        ``dict[key, …]``), so the caller must **not** apply the parent-level
+        multivalued wrapping to branches that return a collection type.
+
+        :param branch: an :class:`AnonymousSlotExpression` from ``any_of``
+        :param parent_slot: the owning :class:`SlotDefinition`
+        :param class_def: the class that declares the slot
+        :return: Python type string for this branch
+        """
+        effective_range = branch.range if branch.range is not None else parent_slot.range
+        # Branch-level inlining overrides parent when explicitly set.
+        effective_inlined = branch.inlined if branch.inlined is not None else parent_slot.inlined
+        effective_inlined_as_list = (
+            branch.inlined_as_list if branch.inlined_as_list is not None else parent_slot.inlined_as_list
+        )
+
+        # Build a temporary slot definition so that generate_python_range picks
+        # up the correct inlining context for this branch.
+        eff_slot = copy.copy(parent_slot)
+        eff_slot.inlined = effective_inlined
+        eff_slot.inlined_as_list = effective_inlined_as_list
+
+        pyrange = self.generate_python_range(effective_range, eff_slot, class_def)
+
+        # When the branch itself is multivalued, wrap in the appropriate
+        # collection type so the union correctly represents ``list[…]`` or
+        # ``dict[key, …]`` rather than just the element type.
+        if branch.multivalued:
+            collection_key: str | None = None
+            if effective_inlined or effective_inlined_as_list:
+                collection_key = self.generate_collection_key([effective_range], parent_slot, class_def)
+            if effective_inlined is False or collection_key is None or effective_inlined_as_list is True:
+                pyrange = f"list[{pyrange}]"
+            else:
+                pyrange = f"dict[{collection_key}, {pyrange}]"
+
         return pyrange
 
     def generate_collection_key(
