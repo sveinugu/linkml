@@ -242,6 +242,10 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
     """
     extra_fields: Literal["allow", "forbid", "ignore"] = "forbid"
     gen_mixin_inheritance: bool = True
+    include_range_class_descendants: bool = False
+    """
+    If set, use an open world assumption and allow the range of a slot to be any descendant of the declared range.
+    """
     injected_classes: list[type | str] | None = None
     """
     A list/tuple of classes to inject into the generated module.
@@ -805,6 +809,12 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
         ):
             if (
                 len([x for x in sv.class_induced_slots(slot_range) if x.designates_type]) > 0
+                and len(sv.class_descendants(slot_range)) > 1
+            ):
+                descendants = [self._get_class_python_name(c) for c in sv.class_descendants(slot_range)]
+                return "Union[" + ",".join(descendants) + "]"
+            elif (
+                self.include_range_class_descendants
                 and len(sv.class_descendants(slot_range)) > 1
             ):
                 descendants = [self._get_class_python_name(c) for c in sv.class_descendants(slot_range)]
@@ -1538,6 +1548,14 @@ Available templates to override:
     default=False,
     help="Use empty list for optional multivalued defaults instead of None (default behavior).",
 )
+@click.option(
+    "--include-range-class-descendants/--no-range-class-descendants",
+    default=False,
+    show_default=False,
+    help="""
+When handling range constraints, include all descendants of the range class instead of just the range class
+""",
+)
 @click.version_option(__version__, "-V", "--version")
 @click.command(name="pydantic")
 def cli(
@@ -1553,6 +1571,7 @@ def cli(
     black: bool = False,
     meta: MetadataMode = "auto",
     emptylist_for_multivalued_slots: bool = False,
+    include_range_class_descendants: bool = False,
     **args,
 ):
     """Generate pydantic classes to represent a LinkML model"""
@@ -1578,6 +1597,7 @@ def cli(
         black=black,
         metadata_mode=meta,
         empty_list_for_multivalued_slots=emptylist_for_multivalued_slots,
+        include_range_class_descendants=include_range_class_descendants,
         **args,
     )
     print(gen.serialize(), end="")
