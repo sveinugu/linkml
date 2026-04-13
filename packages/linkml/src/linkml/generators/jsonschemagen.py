@@ -595,33 +595,51 @@ class JsonSchemaGenerator(Generator, LifecycleMixin):
                     # if the range class has an ID and the slot is not inlined as a list, then we need to consider
                     # various inlined as dict formats
                     if range_id_slot is not None and not slot.inlined_as_list:
-                        # At a minimum, the inlined dict can have keys (additionalProps) that are IDs
-                        # and the values are the range class but possibly omitting the ID.
-                        additionalProps = [JsonSchema.ref_for(reference, identifier_optional=True)]
-
-                        # If the range can be collected as a simple dict, then we can also accept the value
-                        # of that simple dict directly.
-                        if range_simple_dict_value_slot is not None:
-                            additionalProps.append(
-                                self.get_subschema_for_slot(range_simple_dict_value_slot, include_null=False)
-                            )
-
-                        # If the range has no required slots, then null is acceptable
-                        if len(range_required_slots) == 0:
-                            additionalProps.append(JsonSchema({"type": "null"}))
-
-                        # If through the above logic we identified multiple acceptable forms, then wrap them
-                        # in an "anyOf", otherwise just take the only acceptable form
-                        if len(additionalProps) == 1:
-                            additionalProps = additionalProps[0]
+                        # Check if the simple dict value slot has any_of constraints.
+                        # If so, we want to use ONLY those constraints for additionalProperties,
+                        # not include the class wrapper at all. This handles the "constrained object map" pattern
+                        # where the value slot has any_of constraints like: range: Any with any_of [decimal, boolean, integer, string]
+                        if (
+                            range_simple_dict_value_slot is not None
+                            and range_simple_dict_value_slot.any_of is not None
+                            and len(range_simple_dict_value_slot.any_of) > 0
+                        ):
+                            # For constrained object maps: use ONLY the value slot constraints
+                            value_slot_schema = self.get_subschema_for_slot(range_simple_dict_value_slot, include_null=False)
+                            if slot.required or not include_null:
+                                typ = "object"
+                            else:
+                                typ = ["object", "null"]
+                            prop = JsonSchema({"type": typ, "additionalProperties": value_slot_schema})
                         else:
-                            additionalProps = JsonSchema({"anyOf": additionalProps})
-                        if slot.required or not include_null:
-                            typ = "object"
-                        else:
-                            typ = ["object", "null"]
-                        prop = JsonSchema({"type": typ, "additionalProperties": additionalProps})
-                        self.top_level_schema.add_lax_def(reference, self.aliased_slot_name(range_id_slot))
+                            # Original logic for non-constrained dict patterns
+                            # At a minimum, the inlined dict can have keys (additionalProps) that are IDs
+                            # and the values are the range class but possibly omitting the ID.
+                            additionalProps = [JsonSchema.ref_for(reference, identifier_optional=True)]
+
+                            # If the range can be collected as a simple dict, then we can also accept the value
+                            # of that simple dict directly.
+                            if range_simple_dict_value_slot is not None:
+                                additionalProps.append(
+                                    self.get_subschema_for_slot(range_simple_dict_value_slot, include_null=False)
+                                )
+
+                            # If the range has no required slots, then null is acceptable
+                            if len(range_required_slots) == 0:
+                                additionalProps.append(JsonSchema({"type": "null"}))
+
+                            # If through the above logic we identified multiple acceptable forms, then wrap them
+                            # in an "anyOf", otherwise just take the only acceptable form
+                            if len(additionalProps) == 1:
+                                additionalProps = additionalProps[0]
+                            else:
+                                additionalProps = JsonSchema({"anyOf": additionalProps})
+                            if slot.required or not include_null:
+                                typ = "object"
+                            else:
+                                typ = ["object", "null"]
+                            prop = JsonSchema({"type": typ, "additionalProperties": additionalProps})
+                            self.top_level_schema.add_lax_def(reference, self.aliased_slot_name(range_id_slot))
                     else:
                         prop = JsonSchema.array_of(JsonSchema.ref_for(reference), include_null, required=slot.required)
                 else:
