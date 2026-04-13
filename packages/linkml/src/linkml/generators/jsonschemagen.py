@@ -2,7 +2,7 @@ import ast
 import json
 import logging
 import os
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -616,6 +616,29 @@ class JsonSchemaGenerator(Generator, LifecycleMixin):
         ).schema_
         self.top_level_schema.add_def(enum.name, enum_schema)
 
+    def _with_parent_inlining(
+        self,
+        parent: SlotDefinition | AnonymousSlotExpression,
+        branch: AnonymousSlotExpression,
+    ) -> AnonymousSlotExpression:
+        """Return *branch* with ``inlined``/``inlined_as_list`` inherited from *parent*.
+
+        Boolean-combinator branches (``any_of``, ``all_of``, etc.) that carry
+        only a ``range:`` constraint do not set ``inlined`` or ``inlined_as_list``.
+        Without inheriting the enclosing slot's flags,
+        :meth:`SchemaView.is_inlined` returns ``False`` for any class that has
+        an identifier slot — causing the generator to emit ``{"type": "string"}``
+        instead of the correct ``{"$ref": "..."}`` for inlined ranges.
+
+        When the branch explicitly sets either flag (even to ``False``), its own
+        value is preserved unchanged.
+        """
+        if branch.inlined is None and branch.inlined_as_list is None:
+            branch = copy(branch)
+            branch.inlined = parent.inlined
+            branch.inlined_as_list = parent.inlined_as_list
+        return branch
+
     def get_type_info_for_slot_subschema(
         self, slot: SlotDefinition | AnonymousSlotExpression
     ) -> tuple[str, str, str | list[str]]:
@@ -802,19 +825,31 @@ class JsonSchemaGenerator(Generator, LifecycleMixin):
 
         bool_subschema = JsonSchema()
         if slot.any_of is not None and len(slot.any_of) > 0:
-            bool_subschema["anyOf"] = [self.get_subschema_for_slot(s, include_null=False) for s in slot.any_of]
+            bool_subschema["anyOf"] = [
+                self.get_subschema_for_slot(self._with_parent_inlining(slot, s), include_null=False)
+                for s in slot.any_of
+            ]
             if not slot.required and not prop.is_array and include_null:
                 bool_subschema["anyOf"].append({"type": "null"})
 
         if slot.all_of is not None and len(slot.all_of) > 0:
-            bool_subschema["allOf"] = [self.get_subschema_for_slot(s, include_null=False) for s in slot.all_of]
+            bool_subschema["allOf"] = [
+                self.get_subschema_for_slot(self._with_parent_inlining(slot, s), include_null=False)
+                for s in slot.all_of
+            ]
 
         if slot.exactly_one_of is not None and len(slot.exactly_one_of) > 0:
-            bool_subschema["oneOf"] = [self.get_subschema_for_slot(s, include_null=False) for s in slot.exactly_one_of]
+            bool_subschema["oneOf"] = [
+                self.get_subschema_for_slot(self._with_parent_inlining(slot, s), include_null=False)
+                for s in slot.exactly_one_of
+            ]
 
         if slot.none_of is not None and len(slot.none_of) > 0:
             bool_subschema["not"] = {
-                "anyOf": [self.get_subschema_for_slot(s, include_null=False) for s in slot.none_of]
+                "anyOf": [
+                    self.get_subschema_for_slot(self._with_parent_inlining(slot, s), include_null=False)
+                    for s in slot.none_of
+                ]
             }
 
         if bool_subschema:
