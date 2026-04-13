@@ -614,7 +614,35 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
             branch_handles_collection = any(bool(a.multivalued) for a in slot.any_of)
         else:
             slot_ranges.append(slot.range)
-            pyranges = [self.generate_python_range(slot_range, slot, cls) for slot_range in slot_ranges]
+    # For any_of constraints that have multivalued+inlined properties (constrained object maps),
+        # we need to generate the dict type directly rather than processing as a class
+        pyranges = []
+        for slot_range in slot_ranges:
+            # Check if this range is part of an any_of constraint with special properties
+            any_of_slot_expr = None
+            if slot.any_of:
+                for expr in slot.any_of:
+                    if expr.range == slot_range:
+                        any_of_slot_expr = expr
+                        break
+
+            # If this is a constrained object map (multivalued inlined class with value slot having any_of),
+            # generate the dict type directly
+            if (
+                any_of_slot_expr
+                and any_of_slot_expr.multivalued
+                and any_of_slot_expr.inlined
+                and not any_of_slot_expr.inlined_as_list
+                and slot_range in self.schemaview.all_classes()
+            ):
+                simple_dict_value = self._inline_as_simple_dict_with_value_from_any_of(any_of_slot_expr)
+                if simple_dict_value:
+                    pyranges.append(f"dict[str, {simple_dict_value}]")
+                else:
+                    # Fall back to regular processing
+                    pyranges.append(self.generate_python_range(slot_range, slot, cls))
+            else:
+                pyranges.append(self.generate_python_range(slot_range, slot, cls))
 
         pyranges = list(set(pyranges))  # remove duplicates
         pyranges.sort()
@@ -986,9 +1014,76 @@ class PydanticGenerator(OOCodeGenerator, LifecycleMixin):
                         non_id_slots = [slot for slot in range_cls_slots if slot.name != id_slot.name]
                         if len(non_id_slots) == 1:
                             value_slot = non_id_slots[0]
+
+                            # Handle constrained object maps: if the value slot has any_of constraints,
+                            # generate a union of those constraint types instead of using the wrapper class
+                            if value_slot.any_of is not None and len(value_slot.any_of) > 0:
+                                # Build a union of the any_of constraint types
+                                any_of_types = []
+                                for any_of_slot in value_slot.any_of:
+                                    if any_of_slot.range:
+                                        # Check if it's a type first
+                                        if any_of_slot.range in self.schemaview.all_types():
+                                            type_def = self.schemaview.get_type(any_of_slot.range)
+                                            any_of_types.append(_get_pyrange(type_def, self.schemaview))
+                                        elif any_of_slot.range in self.schemaview.all_enums():
+                                            any_of_types.append(self._get_class_python_name(any_of_slot.range))
+
+                                if len(any_of_types) > 0:
+                                    if len(any_of_types) == 1:
+                                        return any_of_types[0]
+                                    else:
+                                        return f"Union[{', '.join(any_of_types)}]"
+
+                            # Original logic for non-constrained dict patterns
                             value_slot_range_type = self.schemaview.get_type(value_slot.range)
                             if value_slot_range_type is not None:
                                 return _get_pyrange(value_slot_range_type, self.schemaview)
+        return None
+
+    def _inline_as_simple_dict_with_value_from_any_of(self, any_of_expr) -> str | None:
+        """
+        Determine if an any_of constraint should be inlined as a simple dict with a value.
+
+        Similar to _inline_as_simple_dict_with_value but works with AnonymousSlotExpression
+        from an any_of constraint rather than a full SlotDefinition.
+
+        :param any_of_expr: AnonymousSlotExpression
+        :return: str for the value type or None
+        """
+        if any_of_expr.range in self.schemaview.all_classes():
+            id_slot = self.schemaview.get_identifier_slot(any_of_expr.range, use_key=True)
+            if id_slot is not None:
+                range_cls_slots = self.schemaview.class_induced_slots(any_of_expr.range)
+                if len(range_cls_slots) == 2:
+                    non_id_slots = [slot for slot in range_cls_slots if slot.name != id_slot.name]
+                    if len(non_id_slots) == 1:
+                        value_slot = non_id_slots[0]
+
+                        # Handle constrained object maps: if the value slot has any_of constraints,
+                        # generate a union of those constraint types instead of using the wrapper class
+                        if value_slot.any_of is not None and len(value_slot.any_of) > 0:
+                            # Build a union of the any_of constraint types
+                            any_of_types = []
+                            for any_of_slot in value_slot.any_of:
+                                if any_of_slot.range:
+                                    # Check if it's a type first
+                                    if any_of_slot.range in self.schemaview.all_types():
+                                        type_def = self.schemaview.get_type(any_of_slot.range)
+                                        any_of_types.append(_get_pyrange(type_def, self.schemaview))
+                                    elif any_of_slot.range in self.schemaview.all_enums():
+                                        any_of_types.append(self._get_class_python_name(any_of_slot.range))
+
+                            if len(any_of_types) > 0:
+                                if len(any_of_types) == 1:
+                                    return any_of_types[0]
+                                else:
+                                    return f"Union[{', '.join(any_of_types)}]"
+
+                        # Original logic for non-constrained dict patterns
+                        value_slot_range_type = self.schemaview.get_type(value_slot.range)
+                        if value_slot_range_type is not None:
+                            return _get_pyrange(value_slot_range_type, self.schemaview)
         return None
 
     def _template_environment(self) -> Environment:
